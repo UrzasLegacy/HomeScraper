@@ -1,0 +1,85 @@
+{
+  "type": "object",
+  "properties": {
+    "data": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "boundary": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "coordinates": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "search_promotion": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "slots": {
+              "type": "array"
+            },
+            "promoted_properties": {
+              "type": "array",
+              "items": {
+                "type": "array"
+              }
+            }
+          }
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "currentPage": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "totalRecords": {
+          "type": "integer"
+        },
+        "totalPage": {
+          "type": "integer"
+        }
+      }
+    },
+    "status": {
+      "type": "boolean"
+    },
+    "message": {
+      "type": "string"
+    }
+  }
+}

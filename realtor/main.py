@@ -202,6 +202,12 @@ def build_listings_header(total, matched, max_price, max_distance):
     bottom = "╚" + "═" * spacing_adjust + "╝"
 
     return ".`\n" + "\n".join([top, title, middle, line1, line2, bottom]) + '`'
+#
+# datamodel-codegen --input realtor_schema.json --input-file-type jsonschema --output _models.py --output-model-type "dataclasses.dataclass"
+
+
+
+
 
 
 def main():
@@ -217,7 +223,7 @@ def main():
         # date_from="2023-05-01", # alternative to past_days
         # date_to="2023-05-28",
         # foreclosure=True
-        mls_only=True,  # only fetch MLS listings
+        # mls_only=True,  # only fetch MLS listings
     )
     total_listings = len(properties_df)
 
