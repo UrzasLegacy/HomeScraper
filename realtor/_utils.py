@@ -1,14 +1,13 @@
 import pandas as pd
+from typing import List, Dict, Any
 
-from ._exceptions import InvalidListingType
-from ._dataclasses import Property, ListingType
+from _exceptions import InvalidListingType
+from _dataclasses import Property
 
 ordered_properties = [
     "property_url",
-    "mls",
-    "mls_id",
-    "status",
-    "style",
+    "list_price",
+    "sqft",
     "street",
     "unit",
     "city",
@@ -17,19 +16,15 @@ ordered_properties = [
     "beds",
     "full_baths",
     "half_baths",
-    "sqft",
     "year_built",
-    "list_price",
     "list_date",
-    "sold_price",
-    "last_sold_date",
     "lot_sqft",
     "price_per_sqft",
     "latitude",
     "longitude",
     "stories",
     "hoa_fee",
-    "parking_garage",
+    "status",
 ]
 
 
@@ -65,8 +60,48 @@ def process_result(result: Property) -> pd.DataFrame:
     return properties_df[ordered_properties]
 
 
-def validate_input(listing_type: str) -> None:
-    if listing_type.upper() not in ListingType.__members__:
-        raise InvalidListingType(
-            f"Provided listing type, '{listing_type}', does not exist."
+def convert_json_to_results(json_data: dict) -> list[Property]:
+    if not json_data or "data" not in json_data or "results" not in json_data["data"]:
+        raise InvalidListingType("Invalid JSON data structure")
+
+    results = json_data["data"]["results"]
+    properties = []
+
+    for item in results:
+        property_obj = Property(
+            property_url=item.get("href", ""),
+            address=item.get("address", {}),
+            list_price=item.get("list_price", 0),
+            list_date=item.get("list_date", ""),
+            hoa_fee=item.get("hoa_fee", 0),
+            description=item.get("description", {}),
+            latitude=item.get("latitude", 0.0),
+            longitude=item.get("longitude", 0.0),
         )
+        properties.append(property_obj)
+
+    return properties
+
+
+
+def convert_details_format(data: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """
+    Convert a list of {'category': str, 'text': List[str]} dicts
+    into a single dict mapping category -> text list.
+    """
+    result: Dict[str, List[str]] = {}
+    for entry in data:
+        cat = entry.get("category")
+        texts = entry.get("text", [])
+        if cat is None:
+            continue
+        if not isinstance(texts, list):
+            texts = [str(texts)]
+        result[cat] = texts
+
+
+
+
+    return result
+
+# read json from file

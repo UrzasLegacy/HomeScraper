@@ -1,26 +1,12 @@
-from _dataclasses import Property, Address, Description
+from _dataclasses import Property, Address, Description, Details
 import json
 import requests
+import time
+from typing import List, Dict, Any
 
-url = "https://realtor-search.p.rapidapi.com/properties/search-buy"
+# https://rapidapi.com/ntd119/api/realtor-search/playground/apiendpoint_7799087b-495b-429c-9040-9b80ac90c34c
 
-querystring = {"location": "state:Massachusetts", "sortBy": "relevance"}
-
-headers = {
-    "x-rapidapi-key": "b8f7e5901emsh0a13963c91d481ep141cb6jsnb9bf0cfd6db6",
-    "x-rapidapi-host": "realtor-search.p.rapidapi.com",
-}
-
-response = requests.get(url, headers=headers, params=querystring)
-json_data = response.json()
-
-time_stamp_for_filename = time.strftime("%Y-%m-%d-%H%M")
-
-with open(f"realtor_rapidapi_data_backup_{time_stamp_for_filename}.json", "w") as f:
-    json.dump(json_data, f, indent=4)
-
-with open("realtor_rapidapi_data.json", "w") as f:
-    json.dump(json_data, f, indent=4)
+TESTING = True
 
 
 class RealtorScraper:
@@ -30,12 +16,25 @@ class RealtorScraper:
         self.API_URL = "https://realtor-search.p.rapidapi.com/"
         self.PROPERTY_URL = "https://www.realtor.com/realestateandhomes-detail/"
 
-    def start_scrape(self, location: str, listing_type: str = "buy", sort_by: str = "relevance") -> dict:
-        if listing_type not in ["buy", "rent"]:
-            raise ValueError("Invalid listing type. Must be 'buy' or 'rent'.")
+    def start_scrape(self, location: str, listing_type: str = "buy", sort_by: str = "relevance", page: int = 1) -> dict:
+        if listing_type not in ["buy"]:
+            raise ValueError("Invalid listing type. Must be 'buy'")
+
+        if TESTING:
+            response_json = read_json_from_file("realtor_rapid_api_data_example.json")
+            print(response_json)
+            return self._parse_general(response_json)
 
         endpoint = f"properties/search-{listing_type}"
-        querystring = {"location": location, "sortBy": sort_by}
+        querystring = {
+            "location": location,
+            "sortBy": sort_by,
+            "resultsPerPage": "50",
+            "prices": ",350000",
+            "bedrooms": "2",
+            "maxHoaFeesPerMonth": 0,
+            "page": page,
+        }
 
         headers = {
             "x-rapidapi-key": "b8f7e5901emsh0a13963c91d481ep141cb6jsnb9bf0cfd6db6",
@@ -49,7 +48,7 @@ class RealtorScraper:
 
         response_json = response.json()
 
-        return self._parse_general_search(response_json)
+        return self._parse_general(response_json)
 
     def _parse_coordinates(self, result: dict) -> tuple:
         if (
@@ -86,6 +85,7 @@ class RealtorScraper:
         city = address_data.get("city")
         state = address_data.get("state_code")
         zip_code = address_data.get("postal_code")
+        county = result["location"].get("county")
 
         return Address(
             street=street,
@@ -93,6 +93,7 @@ class RealtorScraper:
             city=city,
             state=state,
             zip=zip_code,
+            county=county,
         )
 
     def _parse_description(self, result: dict) -> Description:
@@ -101,31 +102,95 @@ class RealtorScraper:
 
         description_data = result["description"]
 
-        style = description_data.get("property_type")
         beds = description_data.get("beds")
-        baths_full = description_data.get("baths_full")
-        baths_half = description_data.get("baths_half")
+        baths_full_calc = description_data.get("baths_full_calc")
+        baths_half_calc = description_data.get("baths_half_calc")
         sqft = description_data.get("sqft")
         lot_sqft = description_data.get("lot_sqft")
-        sold_price = description_data.get("sold_price")
-        year_built = description_data.get("year_built")
-        garage = description_data.get("garage")
-        stories = description_data.get("stories")
+        type = description_data.get("type")
 
         return Description(
-            style=style,
+            type=type,
             beds=beds,
-            baths_full=baths_full,
-            baths_half=baths_half,
+            baths_full_calc=baths_full_calc,
+            baths_half_calc=baths_half_calc,
             sqft=sqft,
             lot_sqft=lot_sqft,
-            sold_price=sold_price,
-            year_built=year_built,
-            garage=garage,
-            stories=stories,
-        )
+        ).to_dict()
 
-    def _parse_general_search(self, response_json: dict) -> dict:
+
+    def _parse_details(self, result: dict) -> Details:
+        if result is None or "details" not in result or result["details"] is None:
+            return Details()
+
+        def convert_details_format(data: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+            """
+            Convert a list of {'category': str, 'text': List[str]} dicts
+            into a single dict mapping category -> text list.
+            """
+            result: Dict[str, List[str]] = {}
+            for entry in data:
+                cat = entry.get("category")
+                texts = entry.get("text", [])
+                if cat is None:
+                    continue
+                cat = cat.lower().replace(" ", "_")
+                if not isinstance(texts, list):
+                    texts = [str(texts)]
+                result[cat] = texts
+            return result
+
+        details_raw = result.get("details", [])
+        details_data = convert_details_format(details_raw)
+
+        bedrooms = details_data.get("bedrooms")
+        bathrooms = details_data.get("bathrooms")
+        other_rooms = details_data.get("other_rooms")
+        appliances = details_data.get("appliances")
+        heating_and_cooling = details_data.get("heating_and_cooling")
+        land_info = details_data.get("land_info")
+        home_features = details_data.get("home_features")
+        interior_features = details_data.get("interior_features")
+        exterior_and_lot_features = details_data.get("exterior_and_lot_features")
+        garage_and_parking = details_data.get("garage_and_parking")
+        homeowners_association = details_data.get("homeowners_association")
+        other_property_info = details_data.get("other_property_info")
+        building_and_construction = details_data.get("building_and_construction")
+        utilities = details_data.get("utilities")
+        kitchen_and_dining = details_data.get("kitchen_and_dining")
+        accessibility_features = details_data.get("accessibility_features")
+        school_information = details_data.get("school_information")
+        amenities_and_community_features = details_data.get("amenities_and_community_features")
+        pool_and_spa = details_data.get("pool_and_spa")
+        multi_unit_info = details_data.get("multi_unit_info")
+        waterfront_and_water_access = details_data.get("waterfront_and_water_access")
+
+        return Details(
+            bedrooms=bedrooms,
+            bathrooms=bathrooms,
+            other_rooms=other_rooms,
+            appliances=appliances,
+            heating_and_cooling=heating_and_cooling,
+            land_info=land_info,
+            home_features=home_features,
+            interior_features=interior_features,
+            exterior_and_lot_features=exterior_and_lot_features,
+            garage_and_parking=garage_and_parking,
+            homeowners_association=homeowners_association,
+            other_property_info=other_property_info,
+            building_and_construction=building_and_construction,
+            utilities=utilities,
+            kitchen_and_dining=kitchen_and_dining,
+            accessibility_features=accessibility_features,
+            school_information=school_information,
+            amenities_and_community_features=amenities_and_community_features,
+            pool_and_spa=pool_and_spa,
+            multi_unit_info=multi_unit_info,
+            waterfront_and_water_access=waterfront_and_water_access,
+        ).to_dict()
+
+
+    def _parse_general(self, response_json: dict) -> dict:
         if (
             response_json is None
             or "data" not in response_json
@@ -151,29 +216,51 @@ class RealtorScraper:
                 and result["location"]["address"].get("coordinate")
             )
 
+            exploded_details = self._parse_details(result)
+
             realty_property = Property(
-                mls=mls,
-                mls_id=(
-                    result["source"].get("listing_id")
-                    if "source" in result and isinstance(result["source"], dict)
-                    else None
-                ),
                 property_url=f"{self.PROPERTY_URL}{result['property_id']}",
-                status=result["status"].upper(),
+                address=self._parse_address(result, search_type="general_search"),
                 list_price=result["list_price"],
                 list_date=(result["list_date"].split("T")[0] if result.get("list_date") else None),
-                prc_sqft=result.get("price_per_sqft"),
                 last_sold_date=result.get("last_sold_date"),
-                hoa_fee=(result["hoa"]["fee"] if result.get("hoa") and isinstance(result["hoa"], dict) else None),
+                last_sold_price = result.get("last_sold_price"),
+
                 latitude=(result["location"]["address"]["coordinate"].get("lat") if able_to_get_lat_long else None),
                 longitude=(result["location"]["address"]["coordinate"].get("lon") if able_to_get_lat_long else None),
-                address=self._parse_address(result, search_type="general_search"),
-                #: neighborhoods=self._parse_neighborhoods(result),
                 description=self._parse_description(result),
-            )
+                details=exploded_details
+            ).to_dict()
             properties.append(realty_property)
 
-        return {
+        output = {
             "total": response_json["data"]["total"],
             "properties": properties,
         }
+
+        write_json_to_file(output)
+
+        return output
+
+
+def write_json_to_file(json_data: dict) -> None:
+    time_stamp_for_filename = time.strftime("%Y-%m-%d-%H%M")
+    with open(f"realtor_rapidapi_data_backup_{time_stamp_for_filename}.json", "w") as f:
+        json.dump(json_data, f, indent=4)
+
+    with open("realtor_rapidapi_data.json", "w") as f:
+        json.dump(json_data, f, indent=4)
+
+
+def read_json_from_file(file_path: str) -> dict:
+    """
+    Read JSON data from a file and return it as a dictionary.
+
+    Args:
+        file_path (str): Path to the JSON file.
+
+    Returns:
+        dict: Parsed JSON data.
+    """
+    with open(file_path, 'r') as file:
+        return json.load(file)
