@@ -16,7 +16,7 @@ class RealtorScraper:
         self.API_URL = "https://realtor-search.p.rapidapi.com/"
         self.PROPERTY_URL = "https://www.realtor.com/realestateandhomes-detail/"
 
-    def start_scrape(self, location: str, listing_type: str = "buy", sort_by: str = "relevance", page: int = 1) -> dict:
+    def start_scrape_location(self, location: str, listing_type: str = "buy", sort_by: str = "relevance", page: int = 1) -> dict:
         if listing_type not in ["buy"]:
             raise ValueError("Invalid listing type. Must be 'buy'")
 
@@ -49,6 +49,44 @@ class RealtorScraper:
         response_json = response.json()
 
         return self._parse_general(response_json)
+
+    # coords example: [[-95.75507, 33.71531], [-94.78302, 33.71531], [-94.78302, 33.40633], [-95.75507, 33.40633], [-95.75507, 33.71531]]
+    def start_scrape_coords(self, coords: list[list[float, float]], listing_type: str = "buy", sort_by: str = "relevance", page: int = 1) -> dict:
+        if listing_type not in ["buy"]:
+            raise ValueError("Invalid listing type. Must be 'buy'")
+
+        if TESTING:
+            response_json = read_json_from_file("realtor_rapid_api_data_example.json")
+            print(response_json)
+            return self._parse_general(response_json)
+
+        endpoint = f"properties/coords/search-{listing_type}"
+        querystring = {
+            "sortBy": sort_by,
+            "resultsPerPage": "50",
+            "prices": ",350000",
+            "bedrooms": "2",
+            "maxHoaFeesPerMonth": 0,
+            "page": page,
+        }
+
+        payload = { "coordinates": coords }
+
+        headers = {
+            "x-rapidapi-key": "b8f7e5901emsh0a13963c91d481ep141cb6jsnb9bf0cfd6db6",
+            "x-rapidapi-host": "realtor-search.p.rapidapi.com",
+	        "Content-Type": "application/json"
+        }
+
+        response = requests.get(self.API_URL + endpoint, json=payload, headers=headers, params=querystring)
+
+        if response.status_code != 200:
+            raise Exception(f"API request failed with status code {response.status_code}")
+
+        response_json = response.json()
+
+        return self._parse_general(response_json)
+
 
     def _parse_coordinates(self, result: dict) -> tuple:
         if (

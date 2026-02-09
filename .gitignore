@@ -102,3 +102,12 @@ ENV/
 
 # pycharm
 .idea/
+
+# csv files
+*.csv
+
+# json files
+*.json
+
+# md files
+*.md
