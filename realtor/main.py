@@ -56,6 +56,7 @@ class Criteria:
     central_coord: Tuple[float, float]
     require_min_bathrooms: float
     require_hoa_zero: bool = True
+    ignore_pending: bool = True
 
 
 def filter_properties(properties_df: pd.DataFrame, criteria: Criteria):
@@ -67,7 +68,7 @@ def filter_properties(properties_df: pd.DataFrame, criteria: Criteria):
     # Identify and store dropped entries (those with missing lat/lon)
     dropped_properties = properties_df[properties_df[["latitude", "longitude"]].isna().any(axis=1)]
     if not dropped_properties.empty:
-        properties_df = properties_df.dropna(subset=["latitude", "longitude"])
+        properties_df = properties_df.dropna(subset=["latitude", "longitude"]).copy()
 
     # Calculate distances for each property and add to DataFrame
     coords = list(zip(properties_df["latitude"].astype(float), properties_df["longitude"].astype(float)))
@@ -102,8 +103,13 @@ def build_filter_mask(properties_df: pd.DataFrame, criteria: Criteria) -> pd.Ser
         masks["hoa"] = pd.Series(True, index=properties_df.index)
 
     if criteria.require_min_bathrooms:
-        full_baths = pd.to_numeric(properties_df.get("full_baths"), errors="coerce").fillna(0)
-        half_baths = pd.to_numeric(properties_df.get("half_baths"), errors="coerce").fillna(0)
+        idx = properties_df.index
+        full_raw = properties_df["full_baths"] if "full_baths" in properties_df.columns else pd.Series(0, index=idx)
+        half_raw = properties_df["half_baths"] if "half_baths" in properties_df.columns else pd.Series(0, index=idx)
+
+        full_baths = pd.to_numeric(full_raw, errors="coerce").fillna(0)
+        half_baths = pd.to_numeric(half_raw, errors="coerce").fillna(0)
+
         bathrooms = full_baths + 0.5 * half_baths
         masks["bathrooms"] = bathrooms >= criteria.require_min_bathrooms
     else:
@@ -325,6 +331,7 @@ class App(tk.Tk):
         self.var_distance = tk.DoubleVar(value=30.0)
         self.var_coord = tk.StringVar(value=env_coord)
         self.var_hoa_zero = tk.BooleanVar(value=True)
+        self.var_ignore_pending = tk.BooleanVar(value=True)
         self.var_min_bathrooms = tk.DoubleVar(value=0.0)
 
         self.var_discord = tk.BooleanVar(value=bool(env_webhook))
@@ -350,13 +357,29 @@ class App(tk.Tk):
 
         row("Location", ttk.Entry(inputs, textvariable=self.var_location), 0)
         row("Past days", ttk.Spinbox(inputs, from_=1, to=60, textvariable=self.var_past_days, width=8), 1)
-        row("Max price", ttk.Spinbox(inputs, from_=50000, to=10000000, increment=5000, textvariable=self.var_price_max, width=8), 2)
-        row("Max distance (miles)", ttk.Spinbox(inputs, from_=5, to=100, increment=5, textvariable=self.var_distance, width=8), 3)
+        row(
+            "Max price",
+            ttk.Spinbox(inputs, from_=50000, to=10000000, increment=5000, textvariable=self.var_price_max, width=8),
+            2,
+        )
+        row(
+            "Max distance (miles)",
+            ttk.Spinbox(inputs, from_=5, to=100, increment=5, textvariable=self.var_distance, width=8),
+            3,
+        )
         row("Central coord (lat,lon)", ttk.Entry(inputs, textvariable=self.var_coord), 4)
-        row("Min bathrooms", ttk.Spinbox(inputs, from_=0, to=5, increment=0.5, textvariable=self.var_min_bathrooms, width=8), 5)
+        row(
+            "Min bathrooms",
+            ttk.Spinbox(inputs, from_=0, to=5, increment=0.5, textvariable=self.var_min_bathrooms, width=8),
+            5,
+        )
 
-        ttk.Checkbutton(inputs, text="Require HOA = 0", variable=self.var_hoa_zero).grid(
+        ttk.Checkbutton(inputs, text="Ignore Listings with HOAs", variable=self.var_hoa_zero).grid(
             row=6, column=1, sticky="w", pady=4
+        )
+
+        ttk.Checkbutton(inputs, text="Ignore Pending/Contingent Listings", variable=self.var_ignore_pending).grid(
+            row=7, column=1, sticky="w", pady=4
         )
 
         # Discord
@@ -415,6 +438,7 @@ class App(tk.Tk):
             central_coord=coord,
             require_min_bathrooms=float(self.var_min_bathrooms.get()),
             require_hoa_zero=bool(self.var_hoa_zero.get()),
+            ignore_pending=bool(self.var_ignore_pending.get()),
         )
 
         self._stop_flag = False
@@ -433,7 +457,9 @@ class App(tk.Tk):
     def _worker_run(self, c: Criteria):
         try:
             self.q.put(("log", f"Scraping location={c.location}, past_days={c.past_days}"))
-            df = scrape_property(location=c.location, listing_type="for_sale", exclude_pending=True, past_days=c.past_days)
+            df = scrape_property(
+                location=c.location, listing_type="for_sale", exclude_pending=c.ignore_pending, past_days=c.past_days
+            )
             total_listings = len(df)
             self.q.put(("log", f"Scraped {total_listings} listings."))
 
@@ -471,7 +497,7 @@ class App(tk.Tk):
                 for i, chunk in enumerate(chunk_dataframe(df, chunk_size=CHUNK_SIZE, chunk_limit=None), 1):
                     message = format_listings(chunk, max_paddings)
                     full_message_string += message
-                    code = send_to_discord(message)
+                    code = send_to_discord(message, webhook=webhook)
                     self.q.put(("log", f"Discord chunk {i}/{num_of_chunks} → HTTP {code}"))
 
                 if not dropped.empty:
