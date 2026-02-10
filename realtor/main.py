@@ -9,7 +9,9 @@ import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from tkinter import filedialog, messagebox, ttk
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Iterable
+import pygame
+
 
 import pandas as pd
 import requests
@@ -45,6 +47,7 @@ DISPLAY_COLS = [
     "updated_days_ago",
 ]
 
+
 @dataclass
 class Criteria:
     location: str
@@ -55,6 +58,11 @@ class Criteria:
     require_min_bathrooms: float
     require_hoa_zero: bool = True
     ignore_pending: bool = True
+
+
+def parse_coord(s: str) -> tuple[float, float]:
+    lat_s, lon_s = [x.strip() for x in s.split(",")]
+    return (float(lat_s), float(lon_s))
 
 
 def filter_properties(properties_df: pd.DataFrame, criteria: Criteria):
@@ -81,28 +89,22 @@ def filter_properties(properties_df: pd.DataFrame, criteria: Criteria):
 def build_filter_mask(properties_df: pd.DataFrame, criteria: Criteria) -> pd.Series:
     """Build boolean mask for combined filter criterion."""
 
-    masks = {}
+    idx = properties_df.index
+    combined_mask = pd.Series(True, index=idx)
 
     if "list_price" in properties_df.columns:
         price = pd.to_numeric(properties_df["list_price"], errors="coerce").fillna(0)
-        masks["formatted_price"] = price <= criteria.price_max
-    else:
-        masks["formatted_price"] = pd.Series(True, index=properties_df.index)
+        combined_mask &= price <= criteria.price_max
 
     if "distance_miles" in properties_df.columns:
         distance = pd.to_numeric(properties_df["distance_miles"], errors="coerce").fillna(0)
-        masks["distance"] = distance <= criteria.max_distance_miles
-    else:
-        masks["distance"] = pd.Series(True, index=properties_df.index)
+        combined_mask &= distance <= criteria.max_distance_miles
 
     if criteria.require_hoa_zero and "hoa_fee" in properties_df.columns:
         hoa = pd.to_numeric(properties_df["hoa_fee"], errors="coerce").fillna(0)
-        masks["hoa"] = hoa == 0
-    else:
-        masks["hoa"] = pd.Series(True, index=properties_df.index)
+        combined_mask &= hoa == 0
 
     if criteria.require_min_bathrooms:
-        idx = properties_df.index
         full_raw = properties_df["full_baths"] if "full_baths" in properties_df.columns else pd.Series(0, index=idx)
         half_raw = properties_df["half_baths"] if "half_baths" in properties_df.columns else pd.Series(0, index=idx)
 
@@ -110,13 +112,7 @@ def build_filter_mask(properties_df: pd.DataFrame, criteria: Criteria) -> pd.Ser
         half_baths = pd.to_numeric(half_raw, errors="coerce").fillna(0)
 
         bathrooms = full_baths + 0.5 * half_baths
-        masks["bathrooms"] = bathrooms >= criteria.require_min_bathrooms
-    else:
-        masks["bathrooms"] = pd.Series(True, index=properties_df.index)
-
-    combined_mask = pd.Series(True, index=properties_df.index)
-    for mask in masks.values():
-        combined_mask &= mask
+        combined_mask &= bathrooms >= criteria.require_min_bathrooms
 
     return combined_mask
 
@@ -171,26 +167,55 @@ def format_listings(df: pd.DataFrame, max_paddings: dict[str, int]) -> str:
     """Format a given properties DataFrame into a Markdown string for Discord display."""
 
     lines = []
-    for _, row in df.iterrows():
+
+    # itertuples is notably faster than iterrows and preserves values as attributes.
+    for row in df.itertuples(index=False):
         # fmt: off
         line = (
-            f"[🔗](<{row['property_url']}>) [:map:](<{build_google_maps_url_from_address(row['address'])}>) `"
+            f"[🔗](<{getattr(row, 'property_url')}>) [:map:](<{build_google_maps_url_from_address(getattr(row, 'address'))}>) `"
             #f"[🔗](<{row['property_url']}>) [:map:](<{build_google_maps_url_from_address(row['address'])}>) [:frame_photo:](<{row['primary_photo']}>) `"
-            + row["address"].ljust(max_paddings["address"]) + " | "
-            + row["formatted_price"].ljust(max_paddings["formatted_price"]) + " | "
-            + f"🛏 {row['beds'].ljust(max_paddings['beds'])} | "
-            + f"🛁 {row['baths'].ljust(max_paddings['baths'])} | "
-            + row["sqft"].ljust(max_paddings["sqft"]) + " | "
-            + "Built: " + row["year_built"].ljust(max_paddings["year_built"]) + " | "
-            + row["style"].ljust(max_paddings["style"]) + " | "
-            + "Lot: " + row["lot"].ljust(max_paddings["lot"]) + " | "
-            + "🅿️  " + row["parking"].ljust(max_paddings["parking"]) + " | "
-            + "Distance: " + row["distance_miles"].ljust(max_paddings["distance_miles"]) + 'mi`'
+            + getattr(row, "address").ljust(max_paddings["address"]) + " | "
+            + getattr(row, "formatted_price").ljust(max_paddings["formatted_price"]) + " | "
+            + f"🛏 {getattr(row, 'beds').ljust(max_paddings['beds'])} | "
+            + f"🛁 {getattr(row, 'baths').ljust(max_paddings['baths'])} | "
+            + getattr(row, "sqft").ljust(max_paddings["sqft"]) + " | "
+            + "Built: " + getattr(row, "year_built").ljust(max_paddings["year_built"]) + " | "
+            + getattr(row, "style").ljust(max_paddings["style"]) + " | "
+            + "Lot: " + getattr(row, "lot").ljust(max_paddings["lot"]) + " | "
+            + "🅿️  " + getattr(row, "parking").ljust(max_paddings["parking"]) + " | "
+            + "Distance: " + getattr(row, "distance_miles").ljust(max_paddings["distance_miles"]) + 'mi`'
         )
         # fmt: on
-        lines.append(f"{line}")
+        lines.append(line)
 
     return f".\n{'\n'.join(lines)}\n"
+
+
+def _add_days_ago_column_inplace(
+    df: pd.DataFrame, date_column: str = "list_date", column_name: str = "days_ago"
+) -> None:
+    """
+    Inplace helper to add a human-readable 'days_ago' column based on the given date column.
+    compute_fields_for_display() already makes a copy, so we can avoid extra copies here.
+    """
+    if date_column not in df.columns:
+        df[column_name] = "Unknown"
+        return
+
+    dates = pd.to_datetime(df[date_column], errors="coerce", utc=True)
+    now = datetime.now(timezone.utc)
+    days = (now - dates).dt.days
+
+    def format_days(d):
+        if pd.isna(d):
+            return "Unknown"
+        if d <= 0:
+            return "less than a day ago"
+        if d == 1:
+            return "1 day ago"
+        return f"{int(d)} days ago"
+
+    df[column_name] = days.map(format_days)
 
 
 def compute_fields_for_display(properties_df: pd.DataFrame) -> pd.DataFrame:
@@ -211,57 +236,39 @@ def compute_fields_for_display(properties_df: pd.DataFrame) -> pd.DataFrame:
         )
     else:
         df["distance_miles"] = "N/A"
-    df = add_days_ago_column(df, date_column="list_date", column_name="posted_days_ago")
-    df = add_days_ago_column(df, date_column="last_update_date", column_name="updated_days_ago")
+
+    # Keep your behavior: compute both columns, defaulting to "Unknown" if missing
+    _add_days_ago_column_inplace(df, date_column="list_date", column_name="posted_days_ago")
+    _add_days_ago_column_inplace(df, date_column="last_update_date", column_name="updated_days_ago")
 
     df = fill_address_fields(df)
 
     # Quick pass to infer types in place and ensure consistent formatting
     df = df.infer_objects(copy=False)
+
     df["address"] = df["street"] + ", " + df["city"] + ", " + df["state"] + " " + df["zip_code"].astype(str)
+
     df["formatted_price"] = "$" + pd.to_numeric(df.get("list_price"), errors="coerce").fillna(0).astype(int).map(
         lambda x: f"{x:,}"
     )
-    df["beds"] = pd.to_numeric(df["beds"], errors="coerce").fillna(0).astype(int).astype(str)
-    full_baths = pd.to_numeric(df.get("full_baths"), errors="coerce").fillna(0).astype(int)
-    half_baths = pd.to_numeric(df.get("half_baths"), errors="coerce").fillna(0).astype(int)
+
+    df["beds"] = pd.to_numeric(df.get("beds"), errors="coerce").fillna(0).astype(int).astype(str)
+
+    full_baths = pd.to_numeric(df.get("full_baths", 0), errors="coerce").fillna(0).astype(int)
+    half_baths = pd.to_numeric(df.get("half_baths", 0), errors="coerce").fillna(0).astype(int)
     df["baths"] = (full_baths + 0.5 * half_baths).astype(str)
-    df["sqft"] = pd.to_numeric(df.get("sqft"), errors="coerce").fillna(0).astype(int).astype(str) + " sqft"
-    df["year_built"] = pd.to_numeric(df.get("year_built"), errors="coerce").fillna(0).astype(int).astype(str)
-    df["style"] = df.get("style").fillna("")
-    df["lot"] = pd.to_numeric(df.get("lot_sqft"), errors="coerce").fillna(0).astype(int).astype(str) + " sqft"
-    df["parking"] = df.get("parking_garage").fillna("—").astype(str)
-    df["property_url"] = df.get("property_url").fillna("#")
 
-    return df
+    df["sqft"] = pd.to_numeric(df.get("sqft", 0), errors="coerce").fillna(0).astype(int).astype(str) + " sqft"
+    df["year_built"] = (
+        pd.to_numeric(df.get("year_built", 0), errors="coerce").fillna(0).astype(int).astype(str)
+    )
 
+    # These .get() calls are now safe even if the column is missing
+    df["style"] = df.get("style", "").fillna("")
+    df["lot"] = pd.to_numeric(df.get("lot_sqft", 0), errors="coerce").fillna(0).astype(int).astype(str) + " sqft"
+    df["parking"] = df.get("parking_garage", "—").fillna("—").astype(str)
+    df["property_url"] = df.get("property_url", "#").fillna("#")
 
-def add_days_ago_column(
-    df: pd.DataFrame, date_column: str = "list_date", column_name: str = "days_ago"
-) -> pd.DataFrame:
-    """Add a human-readable 'days_ago' column based on the given date column."""
-    df = df.copy()
-
-    if date_column not in df.columns:
-        df[column_name] = "Unknown"
-        return df
-
-    # Parse dates and force UTC
-    dates = pd.to_datetime(df[date_column], errors="coerce", utc=True)
-    now = datetime.now(timezone.utc)
-
-    days = (now - dates).dt.days
-
-    def format_days(d):
-        if pd.isna(d):
-            return "Unknown"
-        if d <= 0:
-            return "less than a day ago"
-        if d == 1:
-            return "1 day ago"
-        return f"{int(d)} days ago"
-
-    df[column_name] = days.map(format_days)
     return df
 
 
@@ -308,7 +315,6 @@ def to_display_df(df: pd.DataFrame) -> pd.DataFrame:
     Convert a filtered raw df into a stable, UI-ready df for BOTH Discord + Treeview.
     Ensures all DISPLAY_COLS exist and are strings.
     """
-
     df = df.copy()
 
     for c in DISPLAY_COLS:
@@ -374,13 +380,8 @@ def build_listings_header(total, matched):
     return ".`\n" + "\n".join([top, title, middle, line1, line2, bottom]) + "`"
 
 
-def parse_coord(s: str) -> tuple[float, float]:
-    lat_s, lon_s = [x.strip() for x in s.split(",")]
-    return (float(lat_s), float(lon_s))
-
-
 # ----------------------------
-# Tkinter UI
+#region Tkinter UI
 # ----------------------------
 
 
@@ -392,6 +393,10 @@ class App(tk.Tk):
 
         self.q: queue.Queue = queue.Queue()
         self.worker: Optional[threading.Thread] = None
+
+        pygame.mixer.init()
+        self._music_loaded = False
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Defaults
         env_coord = os.environ.get("CENTRAL_COORD", "42.10, -72.57")
@@ -410,9 +415,22 @@ class App(tk.Tk):
         self.var_webhook = tk.StringVar(value=env_webhook)
 
         self.var_save_csv = tk.BooleanVar(value=False)
+        self.var_music = tk.BooleanVar(value=False)
 
         self._build_ui()
+
+        self._music_path = os.path.join(os.path.dirname(__file__), "background.mp3")
+        self._music_loaded = False
+
+
         self.after(100, self._poll_queue)
+
+    def on_close(self):
+        try:
+            pygame.mixer.music.stop()
+            pygame.mixer.quit()
+        finally:
+            self.destroy()
 
     def _build_ui(self):
         frm = ttk.Frame(self, padding=12)
@@ -482,7 +500,8 @@ class App(tk.Tk):
         ttk.Checkbutton(opts, text="Save CSV", variable=self.var_save_csv).pack(side="left")
         ttk.Button(opts, text="Run scrape", command=self.on_run).pack(side="right")
         ttk.Button(opts, text="Stop (best-effort)", command=self.on_stop).pack(side="right", padx=(0, 8))
-
+        ttk.Checkbutton(opts, text="Background music", variable=self.var_music,
+                        command=self.toggle_music).pack(side="left")
         # Status
         self.status = tk.StringVar(value="Idle.")
         ttk.Label(frm, textvariable=self.status).pack(anchor="center", pady=(10, 0))
@@ -522,6 +541,12 @@ class App(tk.Tk):
     def log(self, s: str):
         self.txt.insert("end", s + "\n")
         self.txt.see("end")
+
+    def toggle_music(self):
+        if self.var_music.get():
+            self.start_music(volume=0.25, loop=True)   # resumes if paused
+        else:
+            self.pause_music()
 
     def on_run(self):
         if self.worker and self.worker.is_alive():
@@ -563,6 +588,41 @@ class App(tk.Tk):
         # best-effort: we can’t reliably abort a network call mid-flight, but we can stop after it returns
         self._stop_flag = True
         self.status.set("Stop requested (best-effort).")
+
+    def start_music(self, volume: float = 0.25, loop: bool = True):
+        # If already loaded and paused, just resume
+        if self._music_loaded and self._music_paused:
+            pygame.mixer.music.set_volume(volume)
+            pygame.mixer.music.unpause()
+            self._music_paused = False
+            return
+
+        # If already playing, do nothing (or just update volume)
+        if self._music_loaded and pygame.mixer.music.get_busy() and not self._music_paused:
+            pygame.mixer.music.set_volume(volume)
+            return
+
+        # Otherwise, load and play from start
+        if not os.path.exists(self._music_path):
+            self.log(f"Music file not found: {self._music_path}")
+            return
+
+        pygame.mixer.music.load(self._music_path)
+        pygame.mixer.music.set_volume(volume)
+        pygame.mixer.music.play(-1 if loop else 0)
+        self._music_loaded = True
+        self._music_paused = False
+
+
+    def stop_music(self):
+        if self._music_loaded:
+            pygame.mixer.music.stop()
+            self.log("Background music stopped.")
+
+    def pause_music(self):
+        if self._music_loaded and pygame.mixer.music.get_busy() and not self._music_paused:
+            pygame.mixer.music.pause()
+            self._music_paused = True
 
     def render_tree(self, display_df: pd.DataFrame):
         self.tree.delete(*self.tree.get_children())
