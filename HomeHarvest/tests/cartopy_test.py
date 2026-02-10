@@ -45,7 +45,7 @@ def draw_map(extra_coords: dict[str, tuple[float, float]] = None):
     """
     if extra_coords is None:
         extra_coords = {}
-
+    os.chdir(r"F:\Backup\AliProjects\AliPY\HomeScraper\HomeHarvest\tests")
     min_lat = min(lat for lat, lon in LANDMARKS.values()) - PADDING
     max_lat = max(lat for lat, lon in LANDMARKS.values()) + PADDING
     min_lon = min(lon for lat, lon in LANDMARKS.values()) - PADDING
@@ -58,7 +58,9 @@ def draw_map(extra_coords: dict[str, tuple[float, float]] = None):
     ax: geoaxes.GeoAxes = plt.axes(projection=ccrs.PlateCarree())
     ax.set_extent((min_lon, max_lon, min_lat, max_lat))  # bounding box
     ax.axis('off')
-    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)  # removes whitespace
+    # Ensure the map area fills the saved image (no figure/axes margins)
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    ax.set_position([0, 0, 1, 1])
 
     # Add features
     ax.add_feature(cfeature.STATES, edgecolor='gray')
@@ -69,12 +71,12 @@ def draw_map(extra_coords: dict[str, tuple[float, float]] = None):
     bbox_height = abs(min_lon - max_lon)
     print(f"Bounding box lengths: (width: {bbox_height}, height: {bbox_length})")
 
-    roads = Reader(r'C:\AliLocalProjects\HomeScraper\realtor\primary_roads\tl_2024_us_primaryroads.shp')
+    roads = Reader(r'F:\Backup\AliProjects\AliPY\HomeScraper\HomeHarvest\tests\primary_roads\tl_2024_us_primaryroads.shp')
     filtered_roads = [geom for geom in roads.geometries() if geom.intersects(bbox)]
     road_feature = cfeature.ShapelyFeature(filtered_roads, ccrs.PlateCarree(), facecolor="none", edgecolor="black", linewidth=0.5)
     ax.add_feature(road_feature)
 
-    area_water = Reader(r'C:\AliLocalProjects\HomeScraper\realtor\area_water\tl_2024_25013_areawater.shp')
+    area_water = Reader(r'F:\Backup\AliProjects\AliPY\HomeScraper\HomeHarvest\tests\area_water\tl_2024_25013_areawater.shp')
     filtered_area_water = [geom for geom in area_water.geometries() if geom.intersects(bbox)]
     area_water_feature = cfeature.ShapelyFeature(filtered_area_water, ccrs.PlateCarree(), facecolor="blue", edgecolor="blue", linewidth=0.1, alpha=0.25)
     ax.add_feature(area_water_feature)
@@ -92,9 +94,9 @@ def draw_map(extra_coords: dict[str, tuple[float, float]] = None):
     ax.text(bbox.centroid.x + 0.1, min_lat + 0.0125, "Connecticut", fontsize=12, horizontalalignment='center', verticalalignment='center')
     ax.text(bbox.centroid.x - 0.1, max_lat - 0.0125, "Massachusetts", fontsize=12, horizontalalignment='center', verticalalignment='center')
 
-    #plt.tight_layout(pad=0)
     plt.ioff()
-    plt.savefig("base_map.jpg", dpi=125)
+    # Save with zero padding so pixel->lat/lon mapping can assume the full image is the extent
+    fig.savefig("base_map.jpg", dpi=125, bbox_inches="tight", pad_inches=0)
 
     # Save bbox as metadata (e.g., in a JSON or txt)
     with open("map_bbox.txt", "w") as f:
