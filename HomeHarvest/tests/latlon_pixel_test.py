@@ -29,6 +29,7 @@ def draw_list_to_img(coord_list):
     :param coord_list: List of tuples (latitude, longitude).
     :return: PIL Image with drawn coordinates.
     """
+    os.chdir(os.path.dirname(__file__))
     img = Image.open("base_map.jpg")
     draw = ImageDraw.Draw(img)
 

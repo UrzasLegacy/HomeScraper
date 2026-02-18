@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional, Tuple, Dict, Iterable
 import pygame
-
+import io
 
 import pandas as pd
 import requests
@@ -33,6 +33,8 @@ DEBUG = False
 
 DISPLAY_COLS = [
     "formatted_price",
+    "posted",
+    "updated",
     "beds",
     "baths",
     "sqft",
@@ -43,8 +45,6 @@ DISPLAY_COLS = [
     "distance_miles",
     "address",
     "property_url",
-    "posted_days_ago",
-    "updated_days_ago",
 ]
 
 
@@ -210,7 +210,7 @@ def _add_days_ago_column_inplace(
         if pd.isna(d):
             return "Unknown"
         if d <= 0:
-            return "less than a day ago"
+            return "today"
         if d == 1:
             return "1 day ago"
         return f"{int(d)} days ago"
@@ -238,8 +238,8 @@ def compute_fields_for_display(properties_df: pd.DataFrame) -> pd.DataFrame:
         df["distance_miles"] = "N/A"
 
     # Keep your behavior: compute both columns, defaulting to "Unknown" if missing
-    _add_days_ago_column_inplace(df, date_column="list_date", column_name="posted_days_ago")
-    _add_days_ago_column_inplace(df, date_column="last_update_date", column_name="updated_days_ago")
+    _add_days_ago_column_inplace(df, date_column="list_date", column_name="posted")
+    _add_days_ago_column_inplace(df, date_column="last_update_date", column_name="updated")
 
     df = fill_address_fields(df)
 
@@ -259,9 +259,7 @@ def compute_fields_for_display(properties_df: pd.DataFrame) -> pd.DataFrame:
     df["baths"] = (full_baths + 0.5 * half_baths).astype(str)
 
     df["sqft"] = pd.to_numeric(df.get("sqft", 0), errors="coerce").fillna(0).astype(int).astype(str) + " sqft"
-    df["year_built"] = (
-        pd.to_numeric(df.get("year_built", 0), errors="coerce").fillna(0).astype(int).astype(str)
-    )
+    df["year_built"] = pd.to_numeric(df.get("year_built", 0), errors="coerce").fillna(0).astype(int).astype(str)
 
     # These .get() calls are now safe even if the column is missing
     df["style"] = df.get("style", "").fillna("")
@@ -380,8 +378,24 @@ def build_listings_header(total, matched):
     return ".`\n" + "\n".join([top, title, middle, line1, line2, bottom]) + "`"
 
 
+def send_df_csv_to_discord(webhook: str, df: pd.DataFrame, filename: str, content: str = "") -> int:
+    """
+    Send a raw DataFrame as a CSV file to a Discord webhook.
+
+    Decision: We send the raw df as a file attachment so it is preserved exactly.
+    This avoids the ambiguity of "pretty" formatted text output and bypasses Discord 2000 char limits.
+    """
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    files = {"file": (filename, io.BytesIO(csv_bytes), "text/csv")}
+    data = {"content": content} if content else {}
+    resp = requests.post(webhook, data=data, files=files, timeout=30)
+    if DEBUG and not resp.ok:
+        print(resp.status_code, resp.text[:2000])
+    return resp.status_code
+
+
 # ----------------------------
-#region Tkinter UI
+# region Tkinter UI
 # ----------------------------
 
 
@@ -389,7 +403,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("HomeHarvest UI")
-        self.geometry("980x720")
+        self.geometry("1920x1080")
 
         self.q: queue.Queue = queue.Queue()
         self.worker: Optional[threading.Thread] = None
@@ -397,6 +411,14 @@ class App(tk.Tk):
         pygame.mixer.init()
         self._music_loaded = False
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Raw is the filtered dataframe prior to compute_fields_for_display, used for exports.
+        # Display is derived for Treeview rendering only.
+        self.raw_df: Optional[pd.DataFrame] = None
+        self.dropped_raw_df: Optional[pd.DataFrame] = None
+        self.display_df: Optional[pd.DataFrame] = None
+        self.last_criteria: Optional[Criteria] = None
+        self.last_total_listings: Optional[int] = None
 
         # Defaults
         env_coord = os.environ.get("CENTRAL_COORD", "42.10, -72.57")
@@ -411,17 +433,15 @@ class App(tk.Tk):
         self.var_ignore_pending = tk.BooleanVar(value=True)
         self.var_min_bathrooms = tk.DoubleVar(value=2.0)
 
-        self.var_discord = tk.BooleanVar(value=bool(env_webhook))
+        # Discord webhook is still configured in the UI, but sending is a post-scrape action.
         self.var_webhook = tk.StringVar(value=env_webhook)
 
-        self.var_save_csv = tk.BooleanVar(value=False)
         self.var_music = tk.BooleanVar(value=False)
 
         self._build_ui()
 
         self._music_path = os.path.join(os.path.dirname(__file__), "background.mp3")
         self._music_loaded = False
-
 
         self.after(100, self._poll_queue)
 
@@ -488,20 +508,40 @@ class App(tk.Tk):
         discord = ttk.LabelFrame(frm, text="Discord", padding=12)
         discord.pack(fill="x", pady=(10, 0))
 
-        ttk.Checkbutton(discord, text="Send to Discord", variable=self.var_discord).grid(row=0, column=0, sticky="w")
-        ttk.Label(discord, text="Webhook URL").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(discord, textvariable=self.var_webhook).grid(row=2, column=0, sticky="ew")
+        ttk.Label(discord, text="Webhook URL").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Entry(discord, textvariable=self.var_webhook).grid(row=1, column=0, sticky="ew")
         discord.grid_columnconfigure(0, weight=1)
+
+        # Decision: this is disabled until a scrape produces raw_df
+        self.btn_send_discord = ttk.Button(
+            discord,
+            text="Send current raw results to Discord (CSV)",
+            command=self.on_send_discord,
+            state="disabled",
+        )
+        self.btn_send_discord.grid(row=1, column=1, padx=(8, 0), sticky="e")
 
         # Output options + buttons
         opts = ttk.Frame(frm)
         opts.pack(fill="x", pady=(10, 0))
 
-        ttk.Checkbutton(opts, text="Save CSV", variable=self.var_save_csv).pack(side="left")
         ttk.Button(opts, text="Run scrape", command=self.on_run).pack(side="right")
         ttk.Button(opts, text="Stop (best-effort)", command=self.on_stop).pack(side="right", padx=(0, 8))
-        ttk.Checkbutton(opts, text="Background music", variable=self.var_music,
-                        command=self.toggle_music).pack(side="left")
+        ttk.Checkbutton(opts, text="Background music", variable=self.var_music, command=self.toggle_music).pack(
+            side="left"
+        )
+
+        # Post-scrape export buttons (disabled until results exist)
+        self.btn_export_raw_csv = ttk.Button(
+            opts, text="Export raw CSV", command=self.on_export_raw_csv, state="disabled"
+        )
+        self.btn_export_raw_csv.pack(side="left")
+
+        self.btn_export_dropped_csv = ttk.Button(
+            opts, text="Export dropped raw CSV", command=self.on_export_dropped_csv, state="disabled"
+        )
+        self.btn_export_dropped_csv.pack(side="left", padx=(8, 0))
+
         # Status
         self.status = tk.StringVar(value="Idle.")
         ttk.Label(frm, textvariable=self.status).pack(anchor="center", pady=(10, 0))
@@ -544,9 +584,21 @@ class App(tk.Tk):
 
     def toggle_music(self):
         if self.var_music.get():
-            self.start_music(volume=0.25, loop=True)   # resumes if paused
+            self.start_music(volume=0.25, loop=True)  # resumes if paused
         else:
             self.pause_music()
+
+    def _set_action_buttons_enabled(self, enabled: bool):
+        """
+        Enable or disable post-scrape actions based on whether we have persisted raw results.
+        """
+        state = "normal" if enabled else "disabled"
+        self.btn_export_raw_csv.config(state=state)
+        self.btn_send_discord.config(state=state)
+
+    def _set_dropped_export_enabled(self, enabled: bool):
+        state = "normal" if enabled else "disabled"
+        self.btn_export_dropped_csv.config(state=state)
 
     def on_run(self):
         if self.worker and self.worker.is_alive():
@@ -557,10 +609,6 @@ class App(tk.Tk):
             coord = parse_coord(self.var_coord.get())
         except Exception:
             messagebox.showerror("Bad coord", "Central coord must look like: 40.7128,-74.0060")
-            return
-
-        if self.var_discord.get() and not self.var_webhook.get().strip():
-            messagebox.showerror("Missing webhook", "Discord enabled but webhook URL is empty.")
             return
 
         c = Criteria(
@@ -574,12 +622,18 @@ class App(tk.Tk):
             ignore_pending=bool(self.var_ignore_pending.get()),
         )
 
+        # Clear UI view, but keep previous results in memory until new ones arrive.
+        # Results persist until overwritten by a successful scrape completion.
         self._stop_flag = False
         self.status.set("Running scrape…")
         self.txt.delete("1.0", "end")
         if hasattr(self, "tree"):
             self.tree.delete(*self.tree.get_children())
         self.log("Starting…")
+
+        # Disable post-scrape actions until new results arrive
+        self._set_action_buttons_enabled(False)
+        self._set_dropped_export_enabled(False)
 
         self.worker = threading.Thread(target=self._worker_run, args=(c,), daemon=True)
         self.worker.start()
@@ -613,7 +667,6 @@ class App(tk.Tk):
         self._music_loaded = True
         self._music_paused = False
 
-
     def stop_music(self):
         if self._music_loaded:
             pygame.mixer.music.stop()
@@ -633,19 +686,29 @@ class App(tk.Tk):
 
         for col in cols:
             self.tree.heading(col, text=col)
-            # reasonable defaults; tweak as you like
             width = 100
-            if col in ("address",):
-                width = 350
-            elif col in ("property_url",):
-                width = 500
-            elif col in ("beds", "baths", "parking"):
+            if col in ("property_url",):
+                width = 750
+                stretch = True
+            elif col in ("address",):
+                width = 400
+                stretch = False
+            elif col in ("formatted_price", "style"):
+                width = 125
+                stretch = False
+            elif col in ("sqft", "parking", "lot", "year_built"):
+                width = 75
+                stretch = False
+            elif col in ("parking", "beds", "baths"):
                 width = 50
-            self.tree.column(col, anchor="w", width=width, stretch=True)
+                stretch = False
+            self.tree.column(col, anchor="w", width=width, stretch=stretch)
 
-        # Insert rows. Use iid = df index so you can map back if needed.
-        for idx, row in display_df.iterrows():
-            values = [row[c] for c in cols]
+        # Insert rows using `iid = df index` to map back if needed.
+        # itertuples is way faster than iterrows for UI insertion.
+        for row in display_df.itertuples(index=True, name=None):
+            idx = row[0]  # first element is the index
+            values = list(row[1:])  # the rest are the column values in order
             self.tree.insert("", "end", iid=str(idx), values=values)
 
     def on_tree_double_click(self, event):
@@ -677,6 +740,62 @@ class App(tk.Tk):
             except ValueError:
                 pass
 
+    def on_export_raw_csv(self):
+        if self.raw_df is None or self.raw_df.empty:
+            messagebox.showinfo("No data", "Run a scrape first.")
+            return
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"HomeHarvest_RAW_{ts}.csv"
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            initialfile=default_name,
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if path:
+            self.raw_df.to_csv(path, index=False)
+            self.log(f"Saved raw CSV: {path}")
+
+    def on_export_dropped_csv(self):
+        if self.dropped_raw_df is None or self.dropped_raw_df.empty:
+            messagebox.showinfo("No dropped data", "No dropped listings to export.")
+            return
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"HomeHarvest_DROPPED_RAW_{ts}.csv"
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            initialfile=default_name,
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if path:
+            self.dropped_raw_df.to_csv(path, index=False)
+            self.log(f"Saved dropped raw CSV: {path}")
+
+    def on_send_discord(self):
+        if self.raw_df is None or self.raw_df.empty:
+            messagebox.showinfo("No data", "Run a scrape first.")
+            return
+
+        webhook = self.var_webhook.get().strip()
+        if not webhook:
+            messagebox.showerror("Missing webhook", "Webhook URL is empty.")
+            return
+
+        total = self.last_total_listings or 0
+        matched = len(self.raw_df)
+
+        # Decision: send a header + attach raw CSV. This preserves raw data exactly and avoids 2000 char limits.
+        header = build_listings_header(total=total, matched=matched)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"HomeHarvest_RAW_{ts}.csv"
+
+        code = send_df_csv_to_discord(webhook, self.raw_df, filename, content=header)
+        self.log(f"Discord upload raw CSV → HTTP {code}")
+
     def _worker_run(self, c: Criteria):
         try:
             self.q.put(("log", f"Scraping location={c.location}, past_days={c.past_days}"))
@@ -690,78 +809,88 @@ class App(tk.Tk):
                 self.q.put(("done", "Stopped."))
                 return
 
-            # Note: `dropped` here is the subset of the filtered df that was dropped due solely to missing lat/lon coords
-            df, dropped = filter_properties(df, c)
+            # Note: dropped_raw is the subset dropped due solely to missing coordinates.
+            filtered_raw, dropped_raw = filter_properties(df, c)
 
-            df: pd.DataFrame = sort_properties(df)
+            filtered_raw = sort_properties(filtered_raw)
 
-            if df.empty:
+            if filtered_raw.empty:
+                # Persist empty results, disable actions.
+                self.q.put(("set_results", (None, dropped_raw, c, total_listings, None)))
                 self.q.put(("done", "No listings matched the criteria."))
                 return
 
-            df = compute_fields_for_display(df)
-            display_df = to_display_df(df)
+            # Build display df only for the UI (treeview).
+            # Decision: compute_fields_for_display is intentionally not persisted as the "raw" result.
+            display_df = to_display_df(compute_fields_for_display(filtered_raw))
 
-            self.q.put(("settable", display_df))
+            # Send results to UI thread to persist.
+            self.q.put(("set_results", (filtered_raw, dropped_raw, c, total_listings, display_df)))
 
-            self.q.put(("log", f"Matched {len(display_df)} after filters."))
+            self.q.put(("done", f"Done. Matched {len(filtered_raw)}."))
+            # df = compute_fields_for_display(df)
+            # display_df = to_display_df(df)
 
-            if self.var_save_csv.get():
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                default_name = f"HomeHarvest_{ts}.csv"
-                self.q.put(("savecsv", (display_df, default_name)))
+            # self.q.put(("settable", display_df))
 
-            if self.var_discord.get():
-                webhook = self.var_webhook.get().strip()
-                header = build_listings_header(total=total_listings, matched=len(display_df))
+            # self.q.put(("log", f"Matched {len(display_df)} after filters."))
 
-                full_message_string = header
-                code = send_to_discord(header, webhook=webhook)
-                self.q.put(("log", f"Discord header → HTTP {code}"))
+            # if self.var_save_csv.get():
+            #     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            #     default_name = f"HomeHarvest_{ts}.csv"
+            #     self.q.put(("savecsv", (display_df, default_name)))
 
-                num_of_chunks = (len(display_df) + CHUNK_SIZE - 1) // CHUNK_SIZE
+            # if self.var_discord.get():
+            #     webhook = self.var_webhook.get().strip()
+            #     header = build_listings_header(total=total_listings, matched=len(display_df))
 
-                max_paddings = get_max_padding(display_df)
+            #     full_message_string = header
+            #     code = send_to_discord(header, webhook=webhook)
+            #     self.q.put(("log", f"Discord header → HTTP {code}"))
 
-                for i, chunk in enumerate(chunk_dataframe(display_df, chunk_size=CHUNK_SIZE, chunk_limit=None), 1):
-                    message = format_listings(chunk, max_paddings)
-                    full_message_string += message
-                    code = send_to_discord(message, webhook=webhook)
-                    self.q.put(("log", f"Discord chunk {i}/{num_of_chunks} → HTTP {code}"))
+            #     num_of_chunks = (len(display_df) + CHUNK_SIZE - 1) // CHUNK_SIZE
 
-                if not dropped.empty:
-                    dropped = sort_properties(dropped)
-                    # dropped = compute_fields_for_display(dropped)
-                    dropped_display = to_display_df(dropped)
+            #     max_paddings = get_max_padding(display_df)
 
-                    total_dropped = len(dropped_display)
+            #     for i, chunk in enumerate(chunk_dataframe(display_df, chunk_size=CHUNK_SIZE, chunk_limit=None), 1):
+            #         message = format_listings(chunk, max_paddings)
+            #         full_message_string += message
+            #         code = send_to_discord(message, webhook=webhook)
+            #         self.q.put(("log", f"Discord chunk {i}/{num_of_chunks} → HTTP {code}"))
 
-                    SPACING_ADJUST = 51
-                    header = (
-                        ".`\n"
-                        "╔" + "═" * SPACING_ADJUST + "╗\n"
-                        f"║ Dropped {total_dropped} properties due to missing coordinates:".ljust(SPACING_ADJUST + 3)
-                        + "║"
-                        "\n╚" + "═" * SPACING_ADJUST + "╝`"
-                    )
-                    code = send_to_discord(header, webhook=webhook)
-                    self.q.put(("log", f"Discord dropped listings header → HTTP {code}"))
+            #     if not dropped.empty:
+            #         dropped = sort_properties(dropped)
+            #         # dropped = compute_fields_for_display(dropped)
+            #         dropped_display = to_display_df(dropped)
 
-                    full_message_string += header
+            #         total_dropped = len(dropped_display)
 
-                    num_of_chunks = (total_dropped + CHUNK_SIZE - 1) // CHUNK_SIZE
+            #         SPACING_ADJUST = 51
+            #         header = (
+            #             ".`\n"
+            #             "╔" + "═" * SPACING_ADJUST + "╗\n"
+            #             f"║ Dropped {total_dropped} properties due to missing coordinates:".ljust(SPACING_ADJUST + 3)
+            #             + "║"
+            #             "\n╚" + "═" * SPACING_ADJUST + "╝`"
+            #         )
+            #         code = send_to_discord(header, webhook=webhook)
+            #         self.q.put(("log", f"Discord dropped listings header → HTTP {code}"))
 
-                    for i, chunk in enumerate(
-                        chunk_dataframe(dropped_display, chunk_size=CHUNK_SIZE, chunk_limit=None), 1
-                    ):
-                        message = format_listings(chunk, max_paddings)
-                        full_message_string += message
-                        code = send_to_discord(message, webhook=webhook)
-                        self.q.put(("log", f"Discord dropped chunk {i}/{num_of_chunks} → HTTP {code}"))
+            #         full_message_string += header
 
-            self.q.put(("done", "Done."))
+            #         num_of_chunks = (total_dropped + CHUNK_SIZE - 1) // CHUNK_SIZE
 
-        except Exception as e:
+            #         for i, chunk in enumerate(
+            #             chunk_dataframe(dropped_display, chunk_size=CHUNK_SIZE, chunk_limit=None), 1
+            #         ):
+            #             message = format_listings(chunk, max_paddings)
+            #             full_message_string += message
+            #             code = send_to_discord(message, webhook=webhook)
+            #             self.q.put(("log", f"Discord dropped chunk {i}/{num_of_chunks} → HTTP {code}"))
+
+            # self.q.put(("done", "Done."))
+
+        except Exception:
             self.q.put(("error", traceback.format_exc()))
 
     def _poll_queue(self):
@@ -773,28 +902,38 @@ class App(tk.Tk):
                 elif kind == "settext":
                     self.txt.delete("1.0", "end")
                     self.txt.insert("end", payload)
-                elif kind == "settable":
-                    self.render_tree(payload)
-                elif kind == "savecsv":
-                    df, default_name = payload
-                    path = filedialog.asksaveasfilename(
-                        defaultextension=".csv",
-                        initialfile=default_name,
-                        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-                    )
-                    if path:
-                        df.to_csv(path, index=False)
-                        self.log(f"Saved CSV: {path}")
+                elif kind == "set_results":
+                    raw_df, dropped_raw_df, criteria, total_listings, display_df = payload
+
+                    self.last_criteria = criteria
+                    self.last_total_listings = total_listings
+
+                    self.raw_df = raw_df
+                    self.dropped_raw_df = dropped_raw_df
+                    self.display_df = display_df
+
+                    if self.display_df is not None and not self.display_df.empty:
+                        self.render_tree(self.display_df)
+
+                    has_results = self.raw_df is not None and not self.raw_df.empty
+                    self._set_action_buttons_enabled(has_results)
+
+                    has_dropped = self.dropped_raw_df is not None and not self.dropped_raw_df.empty
+                    self._set_dropped_export_enabled(has_dropped)
+
                 elif kind == "done":
                     self.status.set(payload)
                     self.log(payload)
+
                 elif kind == "error":
                     self.status.set("Error.")
                     self.txt.insert("end", "\n\n" + payload + "\n")
                     self.txt.see("end")
                     # messagebox.showerror("Error", payload.splitlines()[-1])
+
         except queue.Empty:
             pass
+
         self.after(100, self._poll_queue)
 
 

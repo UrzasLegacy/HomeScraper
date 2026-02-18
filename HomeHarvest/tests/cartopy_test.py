@@ -7,10 +7,6 @@ import matplotlib.pyplot as plt
 from cartopy.io.shapereader import Reader
 from shapely.geometry import box
 
-from PIL import Image
-import matplotlib.pyplot as plt
-
-
 
 COORDS = os.environ["CENTRAL_COORD"].split(",")
 CENTRAL_LATITUDE, CENTRAL_LONGITUDE = map(float, COORDS)
@@ -38,6 +34,7 @@ LANDMARKS = {
     "East Longmeadow": (42.0634, -72.5126),
 }
 
+
 def draw_map(extra_coords: dict[str, tuple[float, float]] = None):
     """
     Draw a map with the given coordinates.
@@ -57,42 +54,67 @@ def draw_map(extra_coords: dict[str, tuple[float, float]] = None):
     fig = plt.figure(figsize=(8, 8))
     ax: geoaxes.GeoAxes = plt.axes(projection=ccrs.PlateCarree())
     ax.set_extent((min_lon, max_lon, min_lat, max_lat))  # bounding box
-    ax.axis('off')
+    ax.axis("off")
     # Ensure the map area fills the saved image (no figure/axes margins)
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
     ax.set_position([0, 0, 1, 1])
 
     # Add features
-    ax.add_feature(cfeature.STATES, edgecolor='gray')
-    ax.add_feature(cfeature.BORDERS, linestyle=':')
+    ax.add_feature(cfeature.STATES, edgecolor="gray")
+    ax.add_feature(cfeature.BORDERS, linestyle=":")
 
     bbox = box(min_lon, min_lat, max_lon, max_lat)
     bbox_length = abs(min_lat - max_lat)
     bbox_height = abs(min_lon - max_lon)
     print(f"Bounding box lengths: (width: {bbox_height}, height: {bbox_length})")
 
-    roads = Reader(r'F:\Backup\AliProjects\AliPY\HomeScraper\HomeHarvest\tests\primary_roads\tl_2024_us_primaryroads.shp')
+    roads = Reader(
+        r"F:\Backup\AliProjects\AliPY\HomeScraper\HomeHarvest\tests\primary_roads\tl_2024_us_primaryroads.shp"
+    )
     filtered_roads = [geom for geom in roads.geometries() if geom.intersects(bbox)]
-    road_feature = cfeature.ShapelyFeature(filtered_roads, ccrs.PlateCarree(), facecolor="none", edgecolor="black", linewidth=0.5)
+    road_feature = cfeature.ShapelyFeature(
+        filtered_roads, ccrs.PlateCarree(), facecolor="none", edgecolor="black", linewidth=0.5
+    )
     ax.add_feature(road_feature)
 
-    area_water = Reader(r'F:\Backup\AliProjects\AliPY\HomeScraper\HomeHarvest\tests\area_water\tl_2024_25013_areawater.shp')
+    area_water = Reader(
+        r"F:\Backup\AliProjects\AliPY\HomeScraper\HomeHarvest\tests\area_water\tl_2024_25013_areawater.shp"
+    )
     filtered_area_water = [geom for geom in area_water.geometries() if geom.intersects(bbox)]
-    area_water_feature = cfeature.ShapelyFeature(filtered_area_water, ccrs.PlateCarree(), facecolor="blue", edgecolor="blue", linewidth=0.1, alpha=0.25)
+    area_water_feature = cfeature.ShapelyFeature(
+        filtered_area_water, ccrs.PlateCarree(), facecolor="blue", edgecolor="blue", linewidth=0.1, alpha=0.25
+    )
     ax.add_feature(area_water_feature)
 
     # Plot landmarks
     for name, (lat, lon) in LANDMARKS.items():
         details = details_by_name(name)
-        ax.plot(lon, lat, marker='o', color=details["label_color"], markersize=details["marker_size"])
+        ax.plot(lon, lat, marker="o", color=details["label_color"], markersize=details["marker_size"])
         ax.text(lon + LABEL_OFFSET, lat + LABEL_OFFSET, name, fontsize=details["fontsize"])
 
     # Plot extra coordinates
     for name, (lat, lon) in extra_coords.items():
-        ax.plot(lon, lat, marker='o', color="violet", markersize=4)
+        details = details_by_name(name)
+        ax.plot(lon, lat, marker="o", color=details["label_color"], markersize=details["marker_size"])
+        ax.text(lon + LABEL_OFFSET, lat + LABEL_OFFSET, name, fontsize=details["fontsize"])
 
-    ax.text(bbox.centroid.x + 0.1, min_lat + 0.0125, "Connecticut", fontsize=12, horizontalalignment='center', verticalalignment='center')
-    ax.text(bbox.centroid.x - 0.1, max_lat - 0.0125, "Massachusetts", fontsize=12, horizontalalignment='center', verticalalignment='center')
+
+    ax.text(
+        bbox.centroid.x + 0.1,
+        min_lat + 0.0125,
+        "Connecticut",
+        fontsize=12,
+        horizontalalignment="center",
+        verticalalignment="center",
+    )
+    ax.text(
+        bbox.centroid.x - 0.1,
+        max_lat - 0.0125,
+        "Massachusetts",
+        fontsize=12,
+        horizontalalignment="center",
+        verticalalignment="center",
+    )
 
     plt.ioff()
     # Save with zero padding so pixel->lat/lon mapping can assume the full image is the extent
@@ -103,11 +125,6 @@ def draw_map(extra_coords: dict[str, tuple[float, float]] = None):
         f.write(",".join(map(str, [min_lat, min_lon, max_lat, max_lon])))
 
 
-
-
-
-
-
 def details_by_name(name):
     if name == "Valley Comms":
         return {"label_color": "red", "marker_size": 4, "fontsize": 8}
@@ -116,9 +133,12 @@ def details_by_name(name):
     return {"label_color": "blue", "marker_size": 2, "fontsize": 8}
 
 
-draw_map({
-    "Walmart 1": (42.1364441198502, -72.50701159161437),
-    "Walmart 2": (42.17267481016297, -72.57376884396496),
-    "Walmart 3": (42.108330001107944, -72.70833897965517),
-    "Walmart 4": (42.341532730798555, -72.64372086093478),
-    "Walmart 5": (42.3547725902552, -72.55253154057571),})
+draw_map(
+    {
+        "Walmart 1": (42.1364441198502, -72.50701159161437),
+        "Walmart 2": (42.17267481016297, -72.57376884396496),
+        "Walmart 3": (42.108330001107944, -72.70833897965517),
+        "Walmart 4": (42.341532730798555, -72.64372086093478),
+        "Walmart 5": (42.3547725902552, -72.55253154057571),
+    }
+)
